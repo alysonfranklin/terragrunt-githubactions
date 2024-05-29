@@ -1,0 +1,244 @@
+name: Terraform - Multiple AWS Accounts
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform (apply or destroy)'
+        required: true
+        default: 'apply'
+      aws_account:
+        description: 'AWS Account to deploy to (data, prod, stage, hml)'
+        required: true
+      terraform_directory:
+        description: 'Directory containing the Terraform code'
+        required: true
+      terraform_version:
+        description: 'Version of Terraform to use'
+        required: true
+        default: '1.0.0'
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ github.event.inputs.terraform_directory }}
+    permissions:
+      actions: read
+      issues: write
+      id-token: write # This is required for requesting the JWT
+      contents: read  # This is required for actions/checkout
+    timeout-minutes: 5
+    steps:
+      - name: Configure AWS Credentials for Data
+        if: ${{ github.event.inputs.aws_account == 'data' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DATA }}
+          aws-region: us-east-1
+
+      - name: Configure AWS Credentials for Prod
+        if: ${{ github.event.inputs.aws_account == 'prod' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          aws-region: us-east-1
+
+      - name: Configure AWS Credentials for Stage
+        if: ${{ github.event.inputs.aws_account == 'stage' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_STAGE }}
+          aws-region: us-east-1
+
+      - name: Configure AWS Credentials for Hml
+        if: ${{ github.event.inputs.aws_account == 'hml' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_HML }}
+          aws-region: us-east-1
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ github.event.inputs.terraform_version }}
+
+      - name: Setup Terragrunt
+        run: |
+          sudo wget -q -O /usr/local/bin/terragrunt https://github.com/gruntwork-io/terragrunt/releases/download/v0.50.12/terragrunt_linux_amd64
+          sudo chmod +x /usr/local/bin/terragrunt
+
+      - name: Plan Terraform changes
+        run: |
+          if [ "${{ github.event.inputs.action }}" == "apply" ]; then
+            terragrunt plan -out=tfplan -lock=false
+          elif [ "${{ github.event.inputs.action }}" == "destroy" ]; then
+            terragrunt plan -destroy -out=tfplan -lock=false
+          else
+            echo "Invalid action specified: ${{ github.event.inputs.action }}"
+            exit 1
+          fi
+
+      - name: Upload repository as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo-files
+          path: .
+
+      - name: Upload Terragrunt as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terragrunt-bin
+          path: /usr/local/bin/terragrunt
+
+  approval:
+    needs: plan
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      issues: write
+      id-token: write # This is required for requesting the JWT
+      contents: read  # This is required for actions/checkout
+    steps:
+      - name: Notify Slack for Pending Approval
+        id: slack
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          # For posting a rich message using Block Kit
+          payload: |
+            {
+              "text": "*Pending Approval*: Terraform deployment for *${{ github.event.inputs.aws_account }}* is awaiting approval.\n*Directory*: ${{ github.event.inputs.terraform_directory }}\n[*View the Action Run*](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Pending Approval*: Terraform deployment for *${{ github.event.inputs.aws_account }}* is awaiting approval.\n*Directory*: ${{ github.event.inputs.terraform_directory }}\n[*View the Action Run*](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Request Manual Approval
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ secrets.GITHUB_TOKEN }}
+          approvers: alysonfranklin
+          minimum-approvals: 1
+          additional-approved-words: 'Approve, Approved, approve, approved'
+        timeout-minutes: 10
+
+  deploy:
+    needs: approval
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ github.event.inputs.terraform_directory }}
+    permissions:
+      id-token: write # This is required for requesting the JWT
+      contents: read  # This is required for actions/checkout
+    timeout-minutes: 20
+    steps:
+      - name: Configure AWS Credentials for Data
+        if: ${{ github.event.inputs.aws_account == 'data' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DATA }}
+          aws-region: us-east-1
+
+      - name: Configure AWS Credentials for Prod
+        if: ${{ github.event.inputs.aws_account == 'prod' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          aws-region: us-east-1
+
+      - name: Configure AWS Credentials for Stage
+        if: ${{ github.event.inputs.aws_account == 'stage' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_STAGE }}
+          aws-region: us-east-1
+
+      - name: Configure AWS Credentials for Hml
+        if: ${{ github.event.inputs.aws_account == 'hml' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_HML }}
+          aws-region: us-east-1
+
+      - name: Download repository artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: repo-files
+          path: .
+
+      - name: Download Terragrunt artifact and install
+        uses: actions/download-artifact@v4
+        with:
+          name: terragrunt-bin
+          path: /usr/local/bin
+
+      - name: Setup Terragrunt
+        run: |
+          sudo chmod +x /usr/local/bin/terragrunt
+
+      - name: Apply or Destroy Terraform
+        run: |
+          if [ "${{ github.event.inputs.action }}" == "apply" ]; then
+            rm -rf .terraform*
+            terragrunt init -reconfigure
+            terragrunt ${{ github.event.inputs.action }} -auto-approve -lock=false
+          elif [ "${{ github.event.inputs.action }}" == "destroy" ]; then
+            rm -rf .terraform*
+            terragrunt init -reconfigure
+            terragrunt ${{ github.event.inputs.action }} -auto-approve -lock=false
+          else
+            echo "Invalid action specified: ${{ github.event.inputs.action }}"
+            exit 1
+          fi
+        working-directory: ${{ github.event.inputs.terraform_directory }}
+
+  notify:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Determine Deployment Status
+        id: deployment_status
+        run: |
+          if [[ "${{ needs.deploy.result }}" == "success" ]]; then
+            echo "::set-output name=status::SUCCESS"
+          elif [[ "${{ needs.deploy.result }}" == "failure" ]]; then
+            echo "::set-output name=status::FAILURE"
+          elif [[ "${{ needs.approval.result }}" == "failure" ]]; then
+            echo "::set-output name=status::CANCELLED"
+          else
+            echo "::set-output name=status::UNKNOWN"
+          fi
+
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "*Deployment Status*: ${{ steps.deployment_status.outputs.status }}\n*Account*: ${{ github.event.inputs.aws_account }}\n*Directory*: ${{ github.event.inputs.terraform_directory }}\n[*View the Action Run*](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Deployment Status*: ${{ steps.deployment_status.outputs.status }}\n*Account*: ${{ github.event.inputs.aws_account }}\n*Directory*: ${{ github.event.inputs.terraform_directory }}\n[*View the Action Run*](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
